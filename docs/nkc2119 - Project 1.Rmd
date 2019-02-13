@@ -1,0 +1,394 @@
+---
+title: "nkc2119 - Project 1"
+output: html_notebook
+---
+
+Student: Noah Chasek-Macfoy  
+uni: nkc2119
+
+##Installing necessary Packages
+
+```{r}
+
+packages.used <- c("ggplot2", "dplyr", "tibble", "tidyr",  "stringr", "tidytext", "ggridges")
+
+# check packages that need to be installed.
+packages.needed <- setdiff(packages.used, intersect(installed.packages()[,1], packages.used))
+
+# install additional packages
+if(length(packages.needed) > 0) {
+  install.packages(packages.needed, dependencies = TRUE, repos = 'http://cran.us.r-project.org')
+}
+
+```
+
+##Workspace Setup
+
+Establishes working directory for whole document and loads Libraries used. 
+
+```{r setup}
+#Note: this is a "setup" chunk.
+
+#sets document working directory to parent folder with the .rmd
+knitr::opts_knit$set(root.dir = normalizePath('../'))
+
+# load the libraries
+library(ggplot2)
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(stringr)
+library(tidytext)
+library(ggridges)
+
+source("../libs/multiplot.R")
+
+```
+
+
+
+## Read in Data
+
+```{r}
+# read in our data --> 
+spooky <- read.csv("data/spooky.csv", as.is = TRUE)
+
+# set author column to "factor"
+spooky$author <- as.factor(spooky$author)
+```
+
+##Frequency Analysis
+
+**Motivation for Approach:** Frequency and frequency relative to other documents (i.e. tf_idf) is an intuitive way to get at what words are "characteristic" of a certain author's texts. I use word frequency not word count so that my results are scaled relative to the total word count of each author, and therefore my results are not skewed in favor of the author with the largest sumber of words in our data set.
+
+Cleans/Prepares Data for display
+```{r}
+# tokenize by word. 
+spooky_wrd <- unnest_tokens(spooky, word, text)
+
+# This eliminates the most frequent by contexually insignificant words --> removes rows of spooky_wrd that match in column word with the stopwords list.  
+spooky_wrd <- anti_join(spooky_wrd, stop_words, by = "word")
+
+# Counts number of times each author used each word.
+author_words <- count(spooky_wrd, word, author)
+
+# Counts number of times each word was used. 
+all_words    <- rename(count(spooky_wrd, word), all = n)
+
+# adds column of the number of times each word appears in the corpus overall to the table
+author_words <- left_join(author_words, all_words, by = "word")
+
+#organizes data from highest frequency to lowest --> orders the tibble by the "all" column from largest to smallest
+author_words <- arrange(author_words, desc(all))
+
+#adds a colum for the frequency of a word's occurence within given author's sentences.
+author_words <- ungroup(mutate(group_by(author_words, author), freqn = n/length(n)))
+
+# alternative method to achieve line above
+#count <- count(author_words, author)
+#author_words <- left_join(author_words, count, by = "author")
+#mutate(author_words, freqn = n/nn)
+
+```
+
+Creates plot of frequent words.
+```{r}
+
+# Top 30 within-author most frequent words for each author
+most_freq <- ungroup(top_n(group_by(author_words, author),30,freqn))
+
+# plot top 30 words by author
+ggplot(most_freq) +
+    geom_col(aes(reorder(word, freqn, FUN = min), freqn, fill = author)) +
+    theme(legend.position = "none") +
+    facet_wrap(~ author, ncol = 3, scales = "free") +
+    coord_flip() +
+    labs(y = "Frequency", x = NULL)
+
+
+```
+
+**Comments:** This is interesting to see which words each author uses, but it does not help us predict. i.e. if we were give one of an authors most freq words from our data, we would not know how likely that word is to have come from that author
+
+**Dis/Advanteges of approach:** My plot of the top 30 most frequent words for each author is not ordered perfectly from most to least frequent. The reason is that while "word" is an ordered factor, its levels are not equal to rows (which are word by author). Since I faceted by author the levels of factor "word" in each authors plot is not determined by the frequency fo that word within that author's texts but the frequency of the word in the whole corpus. 
+
+##Tf-idf Analysis
+
+Prepare data
+```{r}
+
+author_words <- count(spooky_wrd, author, word) #redefines author_words
+author_words <- rename(author_words, dtc = n) # dtc stands for document term count. 
+
+tf_idf <- bind_tf_idf(author_words, word, author, dtc) # creates td-idf data
+
+#  within-author Top 30 highest tf_idf words for each author
+most_freq <- ungroup(top_n(group_by(tf_idf, author),30,tf_idf))
+
+# displays top 30 td_idf words within each author's sentences.
+ggplot(most_freq) +
+    geom_col(aes(word, tf_idf, fill = author)) +
+    labs(x = NULL, y = "tf-idf") +
+    theme(legend.position = "none") +
+    facet_wrap(~ author, ncol = 3, scales = "free_y") + #makes flipped y-axis fixed across all facets
+    coord_flip() +
+    labs(y = "TF-IDF values")
+
+```
+**Comments:**
+MWW has words with several more distinctly charactiertic words than others. Most of these high td_idf value words are  names - with td_idf values higher than the names in the other two author's sentences. I wonder if that suggests her sentences were all taken from a single book or she just reused names more frequently. HPL's list includes "aout" and "abaout" which makes me wonder if td_idf overweights transcription errors. Almost none of the words reveal anything about common topics in any of the wuthor's works. Notably "passion," "beloved", "feelings," "miserable," "entreat." None of the other authors has such emotion filled words in their lists. 
+
+**Dis/Advanteges of approach:** It would have been nice to see some ordering by magnitude in the plots
+
+  
+##Tf_idf Analysis on bi-grams
+  
+**Motivation for Approach:** I use tf_idf to get at the "characteristicness" of words. Bigrams give use more context andinformation about the what is in the text. It makes sense to combine bigram and tf_idf to get a more contextual understanding of what is "characteristic" of each author. 
+
+Prepares and displays data on Frequency
+```{r}
+# Breaks up setences into bigram-by-author-by-row form 
+spooky_bigrams <- spooky %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 2) %>% #breaks data into bigram-per-row from
+  separate(bigram, c("word1", "word2"), sep = " ") %>% # separates each bigram into two columns named "word1" and "word2".
+  filter(!word1 %in% stop_words$word,
+         !word2 %in% stop_words$word) %>% # removes bigram rows where one of the words is in the stopwords list
+  unite(bigram, word1, word2, sep = " ") # re-combines into one bigram column.
+
+#creates table of the most common bigrams in each author
+freq <- count(spooky_bigrams, author, bigram) %>%
+  arrange(desc(n)) %>%
+  group_by(author) %>% 
+  top_n(30) %>% 
+  ungroup
+
+#plots highest count bigrams within each author
+ggplot(freq) +
+  geom_col(aes(bigram, n, fill = author), show.legend = FALSE) +
+  labs(x = NULL, y = "Count") +
+  facet_wrap(~author, ncol = 3, scales = "free_y") + #keeps flipped x-axis constant between authors
+  coord_flip()
+
+```
+
+
+Prepares data and displays bigram tf_idf analysis
+```{r}
+
+# creates tf_idf analysis of my bigram data
+bigram_tf_idf <- spooky_bigrams %>%
+  count(author, bigram) %>%
+  bind_tf_idf(bigram, author, n) %>%
+  arrange(desc(tf_idf)) %>%
+  mutate(bigram = factor(bigram, levels = rev(unique(bigram))))
+ 
+# pulls out top 30 highet tf_idf bigrams within each author
+top_30 <- bigram_tf_idf %>%
+  group_by(author) %>% 
+  top_n(30) %>% 
+  ungroup
+
+#plots highest tf_idf bigrams within each author
+ggplot(top_30, aes(bigram, tf_idf, fill = author)) +
+  geom_col(show.legend = FALSE) +
+  labs(x = NULL, y = "TD-IDF") +
+  facet_wrap(~author, ncol = 3, scales = "free_y") + #keeps flipped x-axis constant between authors
+  coord_flip()
+
+
+
+```
+
+**Comment:** HPL has more obviously spooky bigrams "shunned house", "night wind", "lurking fear","le sorcier","potter's field." "rue morgue" is the only death related bigram in EAP. MWS is still very emotional "wept aloud", "heart broken", and number of variations on "dear...". I also notice that EAP has a lot of French words and names "rue", "mille" "madame l'alande", "marie rogêt", "barrière du". MWS's list also includes some archaic english pronouns "thy", "thou".
+
+
+##French Analysis
+
+Word list source: http://www.gwicks.net/dictionaries.htm
+
+**Motivation of Approach:** Because EAP seemed to have so many french words in his highest bigram tf_idf rankings, I wondered if number of french words would be a good way to distinguish EAP from the other authors.
+
+Prepare data and plot analysis
+
+```{r}
+# read in list of french words and eliminate any overlap with enlishwords. I end up with a list of words that only occur in french.
+french <- read.table("data/francais.txt") # 
+names(french) <- "word"
+english <- read.table("data/english3.txt")
+names(english) <- "word"
+french <- anti_join(french, english, by = "word") # a lot of common english words were in the french list, e.g. "air"
+
+#Counts how many french words are in each author's texts
+spooky_fr <- inner_join(spooky_wrd, french, by = "word")
+count(spooky_fr, author) #meaningful result!
+
+#Displays above count
+ggplot(spooky_fr) +
+  geom_bar(aes(author, fill = author)) +
+  labs(x = NULL)
+
+
+```
+
+**Comment:** My suspicion was clearly born out. EAP uses signifcantly more words than the other author's. This could be used to predict on future texts.
+
+**Advantages/Disadvantages of method:** Will the stark findings here prove valid/predictive among a larger range of EAP? Might all the french  words, even within this corpus, come from just one story and therefore prove not characteristic of EAP in general?   
+  
+There may have been words in the french list that did not parse correctly because of unicode display or transformation issues. It might be worth to looking into whether there are enough words in here that need unicode transformations to try to clean any issues up.
+  
+Unlike the frequency and tf_idf analyses, this analysis is not scalled to account for the differnt total word counts of each author. Therefore this analysis is skewed toward the author with the largest word count. This problem will appear in the remainder of my analyses.
+
+##Punctuation analysis
+
+**Motivation of Approach:** I had a hunch, partially based on the greater sentence length variation we observed in EAP, that EAP might use more complex sentence structures and those complex sentence structures could be identified by the number of punction points used.
+
+Prepare data and Display Analysis
+```{r}
+
+#creates a sentence per row table that includes a column for punction count per sentence
+spooky_punc <- mutate(spooky, pcount = str_count(text,"[[:punct:]]")) %>%
+  select(id, author, pcount)
+
+# plots frequency of different amounts of punctuation per sentence, excluding outliers
+ggplot(filter(spooky_punc, pcount < 7)) +  #cuts sentences with more than 7 punctions; they are distracting outliers
+    geom_bar(aes(pcount, fill = author)) +
+    facet_wrap(~author, scales = "free_x") +
+    labs(x = "occurences of punctuation per sentence")
+
+
+# same display with commas... seems punc is mostly commas
+spooky_com <- mutate(spooky, pcount = str_count(text,",")) %>%
+    select(id, author, pcount)
+
+ggplot(filter(spooky_com, pcount < 7)) +  
+    geom_bar(aes(pcount, fill = author)) +
+    facet_wrap(~author, scales = "free_x") +
+    labs(x = "# of commas per sentence")
+
+  
+
+```
+
+**Comments:**  Most punctuation comes from commas as is probably expected. HPL has many more 2 comma sentnces vs 1 comma sentences relative to the other authors. This might provide some ground for prediction. Overall no strong differentiation by punctuation.
+
+**Dis/Advantages:** This data has the same bias introduced by failing to scale by counts by the total word count of each author. Maybe a better approach would have been to count # of commas relative to sentence length, i.e. punctuation density,  rather than a simple count. There are also some strange very high punctuation count outliers.
+
+
+##Emotional Intensity
+
+**Motivation for approach:** MWS had the most emotional language in the frequency and tf_idf analyses, so it seemed reasonable to explore whether I could measure the high levels of emotional intensity in her texts. I use magnitude of sentiment scores in "Afinn" to measure emotional intensity. Because I am not interested in the kind of sentiment but the intensity I sum negative and positive emotions separately in each sentence rather than take the difference and also sum the absolute value of sentiment scores. 
+
+Prepare data and display Analysis: Emotions by Author
+```{r}
+# tokenize by word.
+spooky_wrd <- unnest_tokens(spooky, word, text)
+
+# This eliminates the most frequent by contexually insignificant words. Creates word by author per row table.
+spooky_wrd <- anti_join(spooky_wrd, stop_words, by = "word")
+
+#associates "afinn" scores with each word
+spooky_em <- inner_join(spooky_wrd, get_sentiments("afinn"), by = "word")
+
+# a simple look at the gross sum of emotional intensity of each author
+simple <- group_by(spooky_em, author) %>%
+  summarise(sum = sum(abs(score)))
+
+ggplot(simple) +
+  geom_col(aes(author, sum, fill = author)) +
+  labs(x = "Emotional Intensity")
+
+```
+
+Prepare data and display Analysis: Emotions by sentence by author
+
+```{r}
+# a look at the frequency of different emotional intensities by sentence
+em <- group_by(spooky_em, id) %>%
+  summarise(em = sum(abs(score)))
+
+# adding author row to em
+x <- select(spooky_em, id, author)
+x <- unique(group_by(x,id))
+em <- left_join(em, x, by = "id")
+
+#creates table of negative emotions by sentence
+neg <- group_by(spooky_em, id) %>%
+  filter(score < 0) %>%
+  summarise(neg = sum(score))
+#creates table of positive emotions by sentence
+pos <- group_by(spooky_em, id) %>%
+  filter(score > 0) %>%
+  summarise(pos = sum(score))
+
+#combines above tables
+sentence_em <- left_join(em, neg, by = "id") %>%
+  left_join(pos, by = "id")
+
+#take a look at top 100 most emotionally intense sentences. Notice how few are not MWS.
+em <- head(arrange(sentence_em, desc(em)),100)
+count(em, author)
+ggplot(em) +
+  geom_col(aes(author, em, fill = author)) +
+  labs(x = "Emotional Intensity")
+
+ggsave("figs/emotionsentences.png")
+
+#take a look at top 100 most emotionally negative sentences.
+neg <- head(arrange(sentence_em, neg),100)
+count(neg, author)
+ggplot(neg) +
+  geom_col(aes(author, neg, fill = author)) +
+  labs(x = "Negative Emotional Intensity") 
+
+ggsave("figs/negemotionsentences.png")
+
+#take a look at top 100 most emotionally positive sentences.
+pos <- head(arrange(sentence_em, desc(pos)),100)
+count(pos, author)
+ggplot(pos) +
+  geom_col(aes(author, pos, fill = author)) +
+  labs(x = "Positive Emotional Intensity")
+
+ggsave("figs/posemotionsentences.png")
+
+# plotting as frequency
+
+# total emptional intensity
+ggplot(filter(sentence_em, em > 10), aes(x = em)) +
+  geom_histogram( aes(fill = author), bins = 10 ) +
+  facet_wrap(~author)
+
+ggsave("figs/emotionfreq.png")
+
+#neg
+ggplot(filter(sentence_em, neg < -10), aes(x = neg)) +
+    geom_histogram( aes(fill = author), bins = 10 ) +
+    facet_wrap(~author)
+
+ggsave("figs/negemotionfreq.png")
+
+#pos
+ggplot(filter(sentence_em, pos > 10), aes(x = pos)) +
+  geom_histogram( aes(fill = author), bins = 10 ) +
+  facet_wrap(~author)
+
+ggsave("figs/posemotionfreq.png")
+
+# plot against each other
+
+plot_em <- sentence_em %>% 
+  mutate(id = factor(id, levels = rev(unique(id)))) %>%
+  arrange(desc(em)) %>%
+  filter(em > 10) # get rid of area without much useful differentiation
+
+
+ggplot(plot_em, aes(em, author, fill = author)) +
+  geom_density_ridges() +
+  scale_x_log10() 
+
+ggsave("figs/emotionfreqridges.png")
+
+```
+**Comment:** MWS clearly does have much more extreme emotional intensity. MWS has greatest sum of emotional intensity over all texts and within sentences. Almost all top 100 emotional setences are MWS, and her top has a scoring sentence is dozens of points higher than any other. I performed the within sentences analysis to see if MWS's emotions are all clustered in a few outlier, extremely emotional sentences or whether MWS is more emotional over all. While it does seem that MWS does have outlier sentences noting how much more area under the MWS curve there is in the density ridges plot suggests that also MWS has a far more bias towards emotional intensity distributed across all her sentences.
+
+
